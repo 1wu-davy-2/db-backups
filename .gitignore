@@ -1,0 +1,15 @@
+# build
+*.exe
+*.test
+*.out
+
+# runtime data
+data/
+.local/
+
+# frontend
+web/node_modules/
+web/dist/
+
+# env
+.env

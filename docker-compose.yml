@@ -1,0 +1,39 @@
+services:
+  meta:
+    image: postgres:16-alpine
+    container_name: dbb-meta
+    environment:
+      POSTGRES_USER: dbb
+      POSTGRES_PASSWORD: dbb_change_me
+      POSTGRES_DB: dbbackups
+    volumes:
+      - meta-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dbb -d dbbackups"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  backupd:
+    build: .
+    container_name: dbb-server
+    depends_on:
+      meta:
+        condition: service_healthy
+    environment:
+      BACKUP_DATABASE_URL: postgres://dbb:dbb_change_me@meta:5432/dbbackups?sslmode=disable
+      # 生产请用 openssl rand -base64 32 生成并妥善保管；丢失后已加密的备份无法解密
+      BACKUP_MASTER_KEY: ${BACKUP_MASTER_KEY:-}
+      BACKUP_DATA_DIR: /data
+      BACKUP_MAX_CONCURRENT: "4"
+      TZ: Asia/Shanghai
+    ports:
+      - "8080:8080"
+    volumes:
+      - app-data:/data
+    restart: unless-stopped
+
+volumes:
+  meta-data:
+  app-data:
