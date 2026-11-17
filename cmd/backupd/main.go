@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -22,6 +23,26 @@ import (
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	// 诊断模式：不连元数据库，直接打印 pg_dump 探测结果。
+	// 遇到 "未找到 pg_dump" 时先跑 `backupd --check-tools`。
+	if len(os.Args) > 1 && (os.Args[1] == "--check-tools" || os.Args[1] == "check-tools") {
+		dataDir := os.Getenv("BACKUP_DATA_DIR")
+		if dataDir == "" {
+			dataDir = "./data"
+		}
+		tc := pg.NewToolchain(config.PgBinDirs(dataDir, os.Getenv("BACKUP_PG_BIN_DIRS")))
+		list := tc.List()
+		fmt.Printf("发现 %d 个可用版本：\n", len(list))
+		for _, t := range list {
+			fmt.Printf("  pg_dump %v  %v\n", t["version"], t["path"])
+		}
+		fmt.Printf("已探测 %d 个路径：\n", len(tc.Searched()))
+		for _, p := range tc.Searched() {
+			fmt.Printf("  %s\n", p)
+		}
+		return
+	}
 
 	cfg, err := config.Load()
 	if err != nil {

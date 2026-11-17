@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -41,28 +42,12 @@ func Load() (*Config, error) {
 		conc = 4
 	}
 
-	dirs := []string{
-		env("BACKUP_PG_BIN_DIRS", ""),
-		"/usr/lib/postgresql/19/bin", "/usr/lib/postgresql/18/bin",
-		"/usr/lib/postgresql/17/bin", "/usr/lib/postgresql/16/bin",
-		"/usr/lib/postgresql/15/bin", "/usr/lib/postgresql/14/bin",
-		"/usr/lib/postgresql/13/bin",
-		"/usr/pgsql-19/bin", "/usr/pgsql-18/bin", "/usr/pgsql-17/bin",
-		"/usr/pgsql-16/bin", "/usr/pgsql-15/bin",
-	}
-	var pgDirs []string
-	for _, d := range strings.Split(strings.Join(dirs, ","), ",") {
-		if d = strings.TrimSpace(d); d != "" {
-			pgDirs = append(pgDirs, d)
-		}
-	}
-
 	cfg := &Config{
 		HTTPAddr:      env("BACKUP_HTTP_ADDR", ":8080"),
 		DatabaseURL:   env("BACKUP_DATABASE_URL", ""),
 		DataDir:       dataDir,
 		MasterKeyFile: filepath.Join(dataDir, "master.key"),
-		PgBinDirs:     pgDirs,
+		PgBinDirs:     PgBinDirs(dataDir, os.Getenv("BACKUP_PG_BIN_DIRS")),
 		SessionTTLDay: ttl,
 		MaxConcurrent: conc,
 	}
@@ -70,4 +55,46 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("BACKUP_DATABASE_URL is required, e.g. postgres://user:pass@127.0.0.1:5432/dbbackups?sslmode=disable")
 	}
 	return cfg, nil
+}
+
+// PgBinDirs 汇总所有 pg_dump 候选目录。
+// 多版本共存是刻意设计：客户端主版本必须 >= 服务端主版本，固定单一版本无法覆盖所有目标库。
+func PgBinDirs(dataDir, extra string) []string {
+	var out []string
+	// 用户显式配置的路径始终保留，跨平台也不过滤。
+	for _, d := range strings.Split(extra, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			out = append(out, d)
+		}
+	}
+
+	var patterns []string
+	if runtime.GOOS == "windows" {
+		patterns = []string{
+			`C:\Program Files\PostgreSQL\*\bin`,
+			`C:\Program Files (x86)\PostgreSQL\*\bin`,
+		}
+	} else {
+		patterns = []string{
+			"/usr/lib/postgresql/19/bin", "/usr/lib/postgresql/18/bin",
+			"/usr/lib/postgresql/17/bin", "/usr/lib/postgresql/16/bin",
+			"/usr/lib/postgresql/15/bin", "/usr/lib/postgresql/14/bin",
+			"/usr/lib/postgresql/13/bin",
+			"/usr/pgsql-19/bin", "/usr/pgsql-18/bin", "/usr/pgsql-17/bin",
+			"/usr/pgsql-16/bin", "/usr/pgsql-15/bin",
+			"/opt/homebrew/opt/postgresql@*/bin",
+			"/usr/local/opt/postgresql@*/bin",
+			"/Applications/Postgres.app/Contents/Versions/*/bin",
+		}
+	}
+	patterns = append(patterns, filepath.Join(dataDir, "pgclient", "*", "bin"))
+
+	for _, pat := range patterns {
+		matches, err := filepath.Glob(pat)
+		if err != nil {
+			continue
+		}
+		out = append(out, matches...)
+	}
+	return out
 }

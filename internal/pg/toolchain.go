@@ -30,9 +30,10 @@ type tool struct {
 // Toolchain 维护可用的 pg_dump/pg_restore 版本矩阵。
 // 关键规则：pg_dump 主版本必须 >= 服务端主版本，否则 dump 无效。
 type Toolchain struct {
-	mu    sync.RWMutex
-	tools []tool
-	dirs  []string
+	mu       sync.RWMutex
+	tools    []tool
+	dirs     []string
+	searched []string
 }
 
 func NewToolchain(dirs []string) *Toolchain {
@@ -43,10 +44,15 @@ func NewToolchain(dirs []string) *Toolchain {
 
 func (t *Toolchain) Refresh() {
 	var found []tool
+	var searched []string
 	seen := map[string]bool{}
 
 	add := func(p string) {
-		if p == "" || seen[p] {
+		if p == "" {
+			return
+		}
+		searched = append(searched, p)
+		if seen[p] {
 			return
 		}
 		if _, err := os.Stat(p); err != nil {
@@ -77,6 +83,7 @@ func (t *Toolchain) Refresh() {
 	}
 	if p, err := exec.LookPath("pg_dump"); err == nil {
 		add(p)
+		searched = append(searched, "PATH: "+p)
 	}
 
 	sort.Slice(found, func(i, j int) bool { return found[i].Major < found[j].Major })
@@ -91,6 +98,7 @@ func (t *Toolchain) Refresh() {
 
 	t.mu.Lock()
 	t.tools = dedup
+	t.searched = searched
 	t.mu.Unlock()
 }
 
@@ -106,12 +114,30 @@ func toolVersion(path string) (string, error) {
 	return strings.TrimSpace(s), nil
 }
 
+// noToolHint 把"缺什么、在哪找过、怎么修"一次说清，避免用户对着一句报错猜。
+func (t *Toolchain) noToolHint() string {
+	lines := []string{"未找到可用的 pg_dump。已探测："}
+	if len(t.searched) == 0 {
+		lines = append(lines, "  （无候选路径）")
+	}
+	for _, p := range t.searched {
+		lines = append(lines, "  - "+p)
+	}
+	lines = append(lines,
+		"修复方式（任选其一）：",
+		"  1. 用 Docker 启动，镜像已内置 pg_dump 15~18：docker compose up -d --build",
+		"  2. 设置 BACKUP_PG_BIN_DIRS=<pg_dump 所在目录> 后重启（多个目录用逗号分隔）",
+		"  3. 安装 postgresql-client，且主版本必须 >= 目标库主版本",
+		"原因：pg_dump 是 PostgreSQL 官方客户端程序，主版本必须 >= 服务端，固定内置一个版本无法兼容所有目标库。")
+	return strings.Join(lines, "\n")
+}
+
 // Pick 选出 >= serverMajor 的最小可用版本。
 func (t *Toolchain) Pick(serverMajor int) (path string, major int, err error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	if len(t.tools) == 0 {
-		return "", 0, fmt.Errorf("未找到 pg_dump：请安装 postgresql-client 或设置 BACKUP_PG_BIN_DIRS")
+		return "", 0, fmt.Errorf("%s", t.noToolHint())
 	}
 	for _, tl := range t.tools {
 		if tl.Major >= serverMajor {
@@ -143,6 +169,15 @@ func exeName(base string) string {
 		return base + ".exe"
 	}
 	return base
+}
+
+// Searched 返回本轮探测过的全部路径，用于 --check-tools 诊断。
+func (t *Toolchain) Searched() []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make([]string, len(t.searched))
+	copy(out, t.searched)
+	return out
 }
 
 // List 返回可读的版本清单，供 /api/system/toolchain 展示。

@@ -79,12 +79,22 @@ go run ./cmd/backupd
 $BACKUP_PG_BIN_DIRS（逗号分隔）
 /usr/lib/postgresql/{19,18,17,16,15,14,13}/bin
 /usr/pgsql-{19,18,17,16,15}/bin
+C:\Program Files\PostgreSQL\*\bin（Windows）
+/opt/homebrew/opt/postgresql@*/bin、/Applications/Postgres.app/...（macOS）
+$BACKUP_DATA_DIR/pgclient/*/bin（便携版）
 PATH 中的 pg_dump
 ```
 
 规则：**所选客户端主版本必须 ≥ 目标库主版本**，取满足条件的最小版本。目标库版本更高时任务直接失败并给出明确提示，不会产出无效 dump。
 
-Docker 镜像已并列安装 15~18 四个版本。
+Docker 镜像已并列安装 15~18 四个版本。本机裸跑时可用 `backupd --check-tools` 查看探测到了哪些版本、还探测了哪些路径。
+
+**为什么不内置 pg_dump？**
+
+- `pg_dump` 是 PostgreSQL 官方的独立 C 客户端程序（依赖 libpq 与压缩库），不是可以 `go get` 的库。
+- 官方硬约束：客户端主版本必须 ≥ 服务端主版本，否则 dump 无效。内置一个固定版本就只能备份更老的库，内置“最新版”也会随目标库升级立刻失效。
+- pgBackRest / Barman / WAL-G 等主流工具同样要求安装匹配的客户端，本项目的 **Docker 形态已经内置四个版本**，属于开箱即用。
+- 本机裸跑的解决办法：设 `BACKUP_PG_BIN_DIRS`（可多个目录，逗号分隔），或把便携版放到 `$BACKUP_DATA_DIR/pgclient/<版本>/bin`。找不到时报错会列出所有探测过的路径和三种修复方式。
 
 ## 4. 使用流程
 
