@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import { api } from '../api'
 import { Modal } from '../components/Overlay'
 import type { Policy, Target, User } from '../types'
@@ -34,12 +35,16 @@ export default function Policies({ user }: { user: User }) {
   const [targets, setTargets] = useState<Target[]>([])
   const [err, setErr] = useState('')
   const [notice, setNotice] = useState('')
+  const [formErr, setFormErr] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [deleting, setDeleting] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState<Policy | null>(null)
   const [form, setForm] = useState<FormState>(EMPTY)
 
   async function load() {
+    setLoading(true)
     try {
       const [p, t] = await Promise.all([api.policies(), api.targets()])
       setList(p)
@@ -47,6 +52,8 @@ export default function Policies({ user }: { user: User }) {
       setErr('')
     } catch (e) {
       setErr(e instanceof Error ? e.message : '加载失败')
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -60,6 +67,7 @@ export default function Policies({ user }: { user: User }) {
     const free = targets.find((t) => !usedTargets.has(t.id))
     setEditing(null)
     setForm({ ...EMPTY, target_id: free?.id ?? 0 })
+    setFormErr('')
     setShowForm(true)
   }
 
@@ -79,16 +87,24 @@ export default function Policies({ user }: { user: User }) {
       encrypt: p.encrypt,
       is_enabled: p.is_enabled,
     })
+    setFormErr('')
     setShowForm(true)
   }
 
-  async function save() {
+  async function save(e: FormEvent) {
+    e.preventDefault()
+    if (busy) return
     if (!form.target_id) {
-      setErr('请选择目标库')
+      setFormErr('请选择目标库')
+      return
+    }
+    if (form.retain_count <= 0 && form.retain_days <= 0 && form.retain_max_gb <= 0) {
+      setFormErr('保留策略至少设置一项：份数 / 天数 / 容量上限')
       return
     }
     setBusy(true)
-    setErr('')
+    setFormErr('')
+    setNotice('')
     try {
       const body = {
         target_id: Number(form.target_id),
@@ -116,20 +132,26 @@ export default function Policies({ user }: { user: User }) {
       setShowForm(false)
       await load()
     } catch (e) {
-      setErr(e instanceof Error ? e.message : '保存失败')
+      setFormErr(e instanceof Error ? e.message : '保存失败')
     } finally {
       setBusy(false)
     }
   }
 
   async function remove(p: Policy) {
+    if (deleting !== null) return
     if (!window.confirm(`删除 ${p.target_name} 的备份策略？已产生的备份不会被删除。`)) return
+    setDeleting(p.id)
+    setErr('')
+    setNotice('')
     try {
       await api.deletePolicy(p.id)
       setNotice('策略已删除')
       await load()
     } catch (e) {
       setErr(e instanceof Error ? e.message : '删除失败')
+    } finally {
+      setDeleting(null)
     }
   }
 
@@ -144,23 +166,22 @@ export default function Policies({ user }: { user: User }) {
           <h1 className="page-title">备份策略</h1>
           <div className="page-sub">一个库一条策略；保留规则三条件任一命中即清理，最新 N 份永不动</div>
         </div>
-        {canWrite && (
-          <div className="topbar-actions">
-            <button className="btn btn-primary" onClick={openCreate} disabled={targets.length === 0}>
-              新建策略
-            </button>
-          </div>
-        )}
+        <div className="topbar-actions">
+          <button className="btn" disabled={loading || deleting !== null} onClick={() => void load()}>{loading ? '加载中…' : '刷新'}</button>
+          {canWrite && <button className="btn btn-primary" onClick={openCreate}
+            disabled={loading || deleting !== null || targets.every((t) => usedTargets.has(t.id))}
+            title={targets.every((t) => usedTargets.has(t.id)) ? '请先添加尚未配置策略的目标库' : undefined}>新建策略</button>}
+        </div>
       </div>
 
-      {err && <div className="error-bar">{err}</div>}
-      {notice && <div className="ok-bar">{notice}</div>}
+      {err && <div className="error-bar" role="alert">{err}</div>}
+      {notice && <div className="ok-bar" role="status">{notice}</div>}
 
-      <div className="card">
+      <div className="card" aria-busy={loading}>
         <div className="table-wrap">
-          {list.length === 0 ? (
+          {loading && list.length === 0 ? <div className="empty">正在加载策略…</div> : list.length === 0 ? (
             <div className="empty">
-              {targets.length === 0 ? '请先添加目标库。' : '还没有策略，备份不会自动执行。'}
+              {err ? '策略加载失败，请刷新重试。' : targets.length === 0 ? '请先添加目标库。' : '还没有策略，备份不会自动执行。'}
             </div>
           ) : (
             <table>
@@ -207,8 +228,8 @@ export default function Policies({ user }: { user: User }) {
                       <div className="cell-actions">
                         {canWrite && (
                           <>
-                            <button className="btn btn-sm" onClick={() => openEdit(p)}>编辑</button>
-                            <button className="btn btn-sm btn-danger" onClick={() => remove(p)}>删除</button>
+                            <button className="btn btn-sm" disabled={loading || deleting !== null} onClick={() => openEdit(p)}>编辑</button>
+                            <button className="btn btn-sm btn-danger" disabled={loading || deleting !== null} onClick={() => remove(p)}>{deleting === p.id ? '删除中…' : '删除'}</button>
                           </>
                         )}
                       </div>
@@ -224,124 +245,109 @@ export default function Policies({ user }: { user: User }) {
       {showForm && (
         <Modal
           title={editing ? `编辑策略 · ${editing.target_name}` : '新建备份策略'}
+          busy={busy}
           onClose={() => setShowForm(false)}
           footer={
             <>
-              <button className="btn" onClick={() => setShowForm(false)}>取消</button>
-              <button className="btn btn-primary" onClick={save} disabled={busy}>
+              <button className="btn" disabled={busy} onClick={() => setShowForm(false)}>取消</button>
+              <button className="btn btn-primary" type="submit" form="policy-form" disabled={busy}>
                 {busy ? '保存中…' : '保存策略'}
               </button>
             </>
           }
         >
-          <div className="field">
-            <label className="label">目标库</label>
-            <select
-              className="select"
-              value={form.target_id}
-              disabled={!!editing}
-              onChange={(e) => setForm({ ...form, target_id: Number(e.target.value) })}
-            >
-              <option value={0}>请选择</option>
-              {availableTargets.map((t) => (
-                <option key={t.id} value={t.id}>{t.name}（{t.host}/{t.dbname}）</option>
-              ))}
-            </select>
-            {availableTargets.length === 0 && (
-              <div className="hint">所有目标库都已有策略，一个库只能有一条。</div>
-            )}
-          </div>
-
-          <div className="field">
-            <label className="label">执行时间（cron，5 段）</label>
-            <input className="input mono" value={form.cron_expr}
-              onChange={(e) => setForm({ ...form, cron_expr: e.target.value })} />
-            <div className="row" style={{ flexWrap: 'wrap', marginTop: 4 }}>
-              {CRON_PRESETS.map((p) => (
-                <button key={p.value} className="btn btn-sm"
-                  onClick={() => setForm({ ...form, cron_expr: p.value })}>
-                  {p.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="field-row">
-            <div className="field">
-              <label className="label">时区</label>
-              <input className="input" value={form.timezone}
-                onChange={(e) => setForm({ ...form, timezone: e.target.value })} />
-            </div>
-            <div className="field">
-              <label className="label">单次超时（秒）</label>
-              <input className="input" type="number" value={form.timeout_seconds}
-                onChange={(e) => setForm({ ...form, timeout_seconds: Number(e.target.value) })} />
-            </div>
-          </div>
-
-          <div style={{ borderTop: '1px solid var(--border)', margin: '16px 0', paddingTop: 14 }}>
-            <div className="label" style={{ marginBottom: 10 }}>保留策略（任一条件命中即清理，三项至少填一项）</div>
-            <div className="field-row">
+          {formErr && <div className="error-bar" role="alert">{formErr}</div>}
+          <form id="policy-form" onSubmit={save}>
+            <fieldset className="form-fields" disabled={busy}>
               <div className="field">
-                <label className="label">保留份数</label>
-                <input className="input" type="number" min={0} value={form.retain_count}
-                  onChange={(e) => setForm({ ...form, retain_count: Number(e.target.value) })} />
+                <label className="label" htmlFor="policy-target">目标库</label>
+                <select id="policy-target" className="select" value={form.target_id} disabled={!!editing}
+                  onChange={(e) => setForm({ ...form, target_id: Number(e.target.value) })}>
+                  <option value={0}>请选择</option>
+                  {availableTargets.map((t) => <option key={t.id} value={t.id}>{t.name}（{t.host}/{t.dbname}）</option>)}
+                </select>
+                {availableTargets.length === 0 && <div className="hint">所有目标库都已有策略，一个库只能有一条。</div>}
               </div>
               <div className="field">
-                <label className="label">保留天数</label>
-                <input className="input" type="number" min={0} value={form.retain_days}
-                  onChange={(e) => setForm({ ...form, retain_days: Number(e.target.value) })} />
+                <label className="label" htmlFor="policy-cron">执行时间（cron，5 段）</label>
+                <input id="policy-cron" className="input mono" value={form.cron_expr} required
+                  onChange={(e) => setForm({ ...form, cron_expr: e.target.value })} />
+                <div className="row" style={{ flexWrap: 'wrap', marginTop: 4 }}>
+                  {CRON_PRESETS.map((p) => <button key={p.value} type="button" className="btn btn-sm"
+                    aria-pressed={form.cron_expr === p.value}
+                    onClick={() => setForm({ ...form, cron_expr: p.value })}>{p.label}</button>)}
+                </div>
               </div>
-            </div>
-            <div className="field-row">
-              <div className="field">
-                <label className="label">容量上限（GB，0 表示不限）</label>
-                <input className="input" type="number" min={0} step="0.5" value={form.retain_max_gb}
-                  onChange={(e) => setForm({ ...form, retain_max_gb: Number(e.target.value) })} />
+              <div className="field-row">
+                <div className="field">
+                  <label className="label" htmlFor="policy-timezone">时区</label>
+                  <input id="policy-timezone" className="input" value={form.timezone} required
+                    onChange={(e) => setForm({ ...form, timezone: e.target.value })} />
+                </div>
+                <div className="field">
+                  <label className="label" htmlFor="policy-timeout">单次超时（秒）</label>
+                  <input id="policy-timeout" className="input" type="number" min={60} max={86400} required value={form.timeout_seconds}
+                    onChange={(e) => setForm({ ...form, timeout_seconds: Number(e.target.value) })} />
+                  <div className="hint">60–86400 秒</div>
+                </div>
               </div>
-              <div className="field">
-                <label className="label">保底份数（永不删除）</label>
-                <input className="input" type="number" min={1} value={form.keep_min_count}
-                  onChange={(e) => setForm({ ...form, keep_min_count: Number(e.target.value) })} />
+              <div style={{ borderTop: '1px solid var(--border)', margin: '16px 0', paddingTop: 14 }}>
+                <div className="label" style={{ marginBottom: 10 }}>保留策略（任一条件命中即清理，三项至少填一项）</div>
+                <div className="field-row">
+                  <div className="field">
+                    <label className="label" htmlFor="policy-count">保留份数</label>
+                    <input id="policy-count" className="input" type="number" min={0} required value={form.retain_count}
+                      onChange={(e) => setForm({ ...form, retain_count: Number(e.target.value) })} />
+                  </div>
+                  <div className="field">
+                    <label className="label" htmlFor="policy-days">保留天数</label>
+                    <input id="policy-days" className="input" type="number" min={0} required value={form.retain_days}
+                      onChange={(e) => setForm({ ...form, retain_days: Number(e.target.value) })} />
+                  </div>
+                </div>
+                <div className="field-row">
+                  <div className="field">
+                    <label className="label" htmlFor="policy-capacity">容量上限（GiB，0 表示不限）</label>
+                    <input id="policy-capacity" className="input" type="number" min={0} step="any" required value={form.retain_max_gb}
+                      onChange={(e) => setForm({ ...form, retain_max_gb: Number(e.target.value) })} />
+                  </div>
+                  <div className="field">
+                    <label className="label" htmlFor="policy-min">保底份数（永不删除）</label>
+                    <input id="policy-min" className="input" type="number" min={1} required value={form.keep_min_count}
+                      onChange={(e) => setForm({ ...form, keep_min_count: Number(e.target.value) })} />
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
-
-          <div className="field-row">
-            <div className="field">
-              <label className="label">压缩</label>
-              <select className="select" value={form.compression}
-                onChange={(e) => setForm({ ...form, compression: e.target.value })}>
-                <option value="zstd:5">zstd:5（推荐）</option>
-                <option value="zstd:9">zstd:9（更小更慢）</option>
-                <option value="gzip:6">gzip:6</option>
-                <option value="none">不压缩</option>
-              </select>
-              <div className="hint">zstd 需要 PG 16+ 客户端，低版本会自动回退 gzip</div>
-            </div>
-            <div className="field">
-              <label className="label">备份后校验</label>
-              <select className="select" value={form.verify_mode}
-                onChange={(e) => setForm({ ...form, verify_mode: e.target.value })}>
-                <option value="toc">解析归档目录（TOC）</option>
-                <option value="checksum">仅校验和</option>
-                <option value="none">不校验</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="row" style={{ gap: 24 }}>
-            <label className="checkbox">
-              <input type="checkbox" checked={form.encrypt}
-                onChange={(e) => setForm({ ...form, encrypt: e.target.checked })} />
-              备份文件加密存储
-            </label>
-            <label className="checkbox">
-              <input type="checkbox" checked={form.is_enabled}
-                onChange={(e) => setForm({ ...form, is_enabled: e.target.checked })} />
-              启用该策略
-            </label>
-          </div>
+              <div className="field-row">
+                <div className="field">
+                  <label className="label" htmlFor="policy-compression">压缩</label>
+                  <select id="policy-compression" className="select" value={form.compression}
+                    onChange={(e) => setForm({ ...form, compression: e.target.value })}>
+                    <option value="zstd:5">zstd:5（推荐）</option>
+                    <option value="zstd:9">zstd:9（更小更慢）</option>
+                    <option value="gzip:6">gzip:6</option>
+                    <option value="none">不压缩</option>
+                  </select>
+                  <div className="hint">zstd 需要 PG 16+ 客户端，低版本会自动回退 gzip</div>
+                </div>
+                <div className="field">
+                  <label className="label" htmlFor="policy-verify">备份后校验</label>
+                  <select id="policy-verify" className="select" value={form.verify_mode}
+                    onChange={(e) => setForm({ ...form, verify_mode: e.target.value })}>
+                    <option value="toc">解析归档目录（TOC）</option>
+                    <option value="checksum">仅校验和</option>
+                    <option value="none">不校验</option>
+                  </select>
+                </div>
+              </div>
+              <div className="row" style={{ gap: 24, flexWrap: 'wrap' }}>
+                <label className="checkbox"><input type="checkbox" checked={form.encrypt}
+                  onChange={(e) => setForm({ ...form, encrypt: e.target.checked })} />备份文件加密存储</label>
+                <label className="checkbox"><input type="checkbox" checked={form.is_enabled}
+                  onChange={(e) => setForm({ ...form, is_enabled: e.target.checked })} />启用该策略</label>
+              </div>
+            </fieldset>
+          </form>
         </Modal>
       )}
     </>

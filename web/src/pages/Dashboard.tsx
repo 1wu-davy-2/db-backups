@@ -1,20 +1,26 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
-import type { DailyCount, Job, Stats, View } from '../types'
+import type { DailyCount, Job, Stats, SystemInfo, View } from '../types'
 import { formatBytes, formatDuration, formatTime, relTime, statusMeta, triggerLabel } from '../utils'
 
 interface Props {
   onView: (v: View) => void
+  onJob: (id: number) => void
 }
 
-export default function Dashboard({ onView }: Props) {
+export default function Dashboard({ onView, onJob }: Props) {
   const [stats, setStats] = useState<Stats | null>(null)
   const [daily, setDaily] = useState<DailyCount[]>([])
   const [jobs, setJobs] = useState<Job[]>([])
   const [err, setErr] = useState('')
+  const [system, setSystem] = useState<SystemInfo | null>(null)
+  const [systemErr, setSystemErr] = useState('')
+  const [refresh, setRefresh] = useState(0)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     let alive = true
+    setLoading(true)
     ;(async () => {
       try {
         const [s, d, j] = await Promise.all([api.stats(), api.daily(7), api.jobs({ limit: 8 })])
@@ -22,14 +28,20 @@ export default function Dashboard({ onView }: Props) {
         setStats(s)
         setDaily(d)
         setJobs(j.items ?? [])
+        setErr('')
       } catch (e) {
         if (alive) setErr(e instanceof Error ? e.message : '加载失败')
+      } finally {
+        if (alive) setLoading(false)
       }
     })()
-    return () => {
-      alive = false
-    }
-  }, [])
+    api.systemInfo().then((info) => {
+      if (alive) { setSystem(info); setSystemErr('') }
+    }).catch((e) => {
+      if (alive) setSystemErr(e instanceof Error ? e.message : '客户端状态加载失败')
+    })
+    return () => { alive = false }
+  }, [refresh])
 
   const maxTotal = Math.max(1, ...daily.map((d) => d.total))
 
@@ -47,6 +59,7 @@ export default function Dashboard({ onView }: Props) {
               {stats.running_jobs} 个任务执行中
             </span>
           )}
+          <button className="btn" disabled={loading} onClick={() => setRefresh((n) => n + 1)}>{loading ? '加载中…' : '刷新'}</button>
           <button className="btn" onClick={() => onView('jobs')}>查看全部任务</button>
         </div>
       </div>
@@ -115,7 +128,9 @@ export default function Dashboard({ onView }: Props) {
                     const st = statusMeta(j.status)
                     return (
                       <tr key={j.id}>
-                        <td style={{ width: 44 }} className="mono faint">#{j.id}</td>
+                        <td style={{ width: 44 }} className="mono">
+                          <button className="btn-link mono" aria-label={`查看任务 #${j.id}`} onClick={() => onJob(j.id)}>#{j.id}</button>
+                        </td>
                         <td>
                           <div>{j.target_name}</div>
                           <div className="faint small">{triggerLabel(j.trigger)}</div>
@@ -134,6 +149,32 @@ export default function Dashboard({ onView }: Props) {
           </div>
         </div>
       </div>
+
+      <section className="card toolchain-card" aria-label="备份客户端状态">
+        <div className="card-head">
+          <span className="card-title">备份客户端</span>
+          {system && !systemErr && <span className={`badge ${system.toolchain.length ? 'badge-ok' : 'badge-warn'}`}>
+            {system.toolchain.length ? `${system.toolchain.length} 个可用版本` : '需要配置'}
+          </span>}
+        </div>
+        <div className="card-body">
+          {systemErr ? <div className="error-bar" role="alert">{systemErr} <button className="btn-link" onClick={() => setRefresh((n) => n + 1)}>重试</button></div>
+            : !system ? <div className="muted small">正在读取客户端状态…</div>
+              : system.toolchain.length > 0 ? <div className="toolchain-list">
+                {system.toolchain.map((tool) => <div className="toolchain-row" key={tool.major}>
+                  <span className="badge badge-info">pg_dump {tool.version}</span>
+                  <span className="mono small muted toolchain-path">{tool.path}</span>
+                </div>)}
+              </div> : <>
+                <div style={{ color: 'var(--warn)', fontWeight: 500 }}>未发现可用的 pg_dump</div>
+                <div className="small muted" style={{ marginTop: 6 }}>在服务端设置 <code>BACKUP_PG_BIN_DIRS</code>，或将客户端放入数据目录下的 <code>pgclient/&lt;版本&gt;/bin</code>，然后重启服务。</div>
+              </>}
+          <div className="toolchain-help small muted">
+            客户端主版本必须 ≥ 目标库主版本；系统自动选择满足条件的最小版本，并不代表兼容所有目标库。
+            在服务端运行 <code>backupd --check-tools</code> 可查看探测路径；安装客户端后需重启服务。
+          </div>
+        </div>
+      </section>
     </>
   )
 }

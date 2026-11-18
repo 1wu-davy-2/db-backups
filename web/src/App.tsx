@@ -14,6 +14,17 @@ export default function App() {
   const [needsSetup, setNeedsSetup] = useState(false)
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState<View>('dashboard')
+  const [jobID, setJobID] = useState<number | null>(null)
+
+  function navigate(next: View) {
+    setJobID(null)
+    setView(next)
+  }
+
+  function openJob(id: number) {
+    setJobID(id)
+    setView('jobs')
+  }
 
   useEffect(() => {
     let alive = true
@@ -59,7 +70,7 @@ export default function App() {
     <Layout
       user={user}
       view={view}
-      onView={setView}
+      onView={navigate}
       onLogout={async () => {
         try {
           await api.logout()
@@ -68,10 +79,10 @@ export default function App() {
         }
       }}
     >
-      {view === 'dashboard' && <Dashboard onView={setView} />}
-      {view === 'targets' && <Targets user={user} />}
+      {view === 'dashboard' && <Dashboard onView={navigate} onJob={openJob} />}
+      {view === 'targets' && <Targets user={user} onJob={openJob} />}
       {view === 'policies' && <Policies user={user} />}
-      {view === 'jobs' && <Jobs user={user} />}
+      {view === 'jobs' && <Jobs user={user} initialJobID={jobID} />}
       {view === 'audit' && <Audit />}
     </Layout>
   )
