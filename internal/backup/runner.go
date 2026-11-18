@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/weigong/dbbackups/internal/domain"
+	"github.com/weigong/dbbackups/internal/mysql"
 	"github.com/weigong/dbbackups/internal/pg"
 	"github.com/weigong/dbbackups/internal/secrets"
 	"github.com/weigong/dbbackups/internal/storage"
@@ -25,12 +26,13 @@ import (
 const advisoryPrefix int64 = 0x4442424B << 32
 
 type Runner struct {
-	Store   *store.Store
-	Keys    *secrets.Keyring
-	Tools   *pg.Toolchain
-	Blob    storage.Storage
-	Logs    *LogHub
-	DataDir string
+	Store      *store.Store
+	Keys       *secrets.Keyring
+	Tools      *pg.Toolchain
+	MySQLTools *mysql.Toolchain
+	Blob       storage.Storage
+	Logs       *LogHub
+	DataDir    string
 
 	sem    chan struct{}
 	mu     sync.Mutex
@@ -38,13 +40,13 @@ type Runner struct {
 	cancel map[int64]context.CancelFunc
 }
 
-func NewRunner(st *store.Store, keys *secrets.Keyring, tools *pg.Toolchain,
+func NewRunner(st *store.Store, keys *secrets.Keyring, tools *pg.Toolchain, mysqlTools *mysql.Toolchain,
 	blob storage.Storage, logs *LogHub, dataDir string, maxConcurrent int) *Runner {
 	if maxConcurrent <= 0 {
 		maxConcurrent = 4
 	}
 	return &Runner{
-		Store: st, Keys: keys, Tools: tools, Blob: blob, Logs: logs, DataDir: dataDir,
+		Store: st, Keys: keys, Tools: tools, MySQLTools: mysqlTools, Blob: blob, Logs: logs, DataDir: dataDir,
 		sem:    make(chan struct{}, maxConcurrent),
 		busy:   make(map[int64]bool),
 		cancel: make(map[int64]context.CancelFunc),
@@ -134,6 +136,9 @@ func (r *Runner) Run(ctx context.Context, jobID int64) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("加载任务失败: %w", err)
 	}
+	if job.Status != domain.JobPending {
+		return nil
+	}
 	target, err := r.Store.GetTarget(ctx, job.TargetID)
 	if err != nil {
 		return fmt.Errorf("加载目标库失败: %w", err)
@@ -152,7 +157,23 @@ func (r *Runner) Run(ctx context.Context, jobID int64) (retErr error) {
 			DumpFormat: domain.FormatCustom, Compression: "zstd:5",
 			KeepMinCount: 3, VerifyMode: "toc", TimeoutSeconds: 7200,
 		}
+		if target.Engine != domain.EnginePostgres {
+			p.DumpFormat = domain.FormatSQL
+			p.Compression = "gzip:6"
+			p.VerifyMode = "checksum"
+		}
 	}
+
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	r.mu.Lock()
+	r.cancel[jobID] = stop
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		delete(r.cancel, jobID)
+		r.mu.Unlock()
+	}()
 
 	var (
 		startedAt time.Time
@@ -166,6 +187,9 @@ func (r *Runner) Run(ctx context.Context, jobID int64) (retErr error) {
 	defer func() {
 		if retErr != nil {
 			code, msg = splitCode(retErr)
+			if errors.Is(ctx.Err(), context.Canceled) {
+				code, msg = "CANCELED", "任务已取消"
+			}
 		}
 		if code == "" && retErr == nil {
 			code = ""
@@ -239,14 +263,6 @@ func (r *Runner) Run(ctx context.Context, jobID int64) (retErr error) {
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	r.mu.Lock()
-	r.cancel[jobID] = cancel
-	r.mu.Unlock()
-	defer func() {
-		r.mu.Lock()
-		delete(r.cancel, jobID)
-		r.mu.Unlock()
-	}()
 
 	log.Printf("开始备份 %s (%s)", target.Name, target.Engine)
 
@@ -265,49 +281,70 @@ func (r *Runner) Run(ctx context.Context, jobID int64) (retErr error) {
 	}
 
 	// 2) 预检：版本、容量、权限
-	info, err := pg.Probe(runCtx, conn)
+	var info *pg.ServerInfo
+	if target.Engine == domain.EnginePostgres {
+		info, err = pg.Probe(runCtx, conn)
+	} else {
+		info, err = mysql.Probe(runCtx, target, pw)
+	}
 	if err != nil {
 		return failf(pg.ErrConnectFailed, "%s", strings.ReplaceAll(err.Error(), pw, "******"))
 	}
 	serverVer = info.Version
 	_ = r.Store.UpdateTargetProbe(ctx, target.ID, info.Version, info.VersionNum, info.DBSizeBytes)
-	log.Printf("目标库 PostgreSQL %s（%d 张表，%.2f MiB）",
-		info.Version, info.TableCount, float64(info.DBSizeBytes)/1024/1024)
+	log.Printf("目标库 %s %s（%d 张表，%.2f MiB）",
+		target.Engine, info.Version, info.TableCount, float64(info.DBSizeBytes)/1024/1024)
 	if info.UnreadableTbl > 0 {
 		log.Printf("[warn] 有 %d 张表当前账号无 SELECT 权限，这些表的内容不会被备份", info.UnreadableTbl)
 	}
 
-	// 3) 选择 pg_dump 版本（必须 >= 服务端主版本）
-	bin, major, err := r.Tools.Pick(info.Major)
-	if err != nil {
-		return failf(pg.ErrToolMissing, "%s", err.Error())
-	}
-	zipArg, actualZip, err := pg.CompressArg(p.Compression, major)
-	if err != nil {
-		return failf("CONFIG", "%s", err.Error())
-	}
-	if actualZip != p.Compression {
-		log.Printf("[warn] 客户端 %d 不支持 %s，已回退为 %s", major, p.Compression, actualZip)
-	}
-	log.Printf("使用 %s（主版本 %d），压缩 %s", filepath.Base(bin), major, actualZip)
-
-	// 4) 执行 dump
 	scratchDir := filepath.Join(r.DataDir, "scratch")
 	if err := os.MkdirAll(scratchDir, 0o750); err != nil {
 		return fmt.Errorf("准备暂存目录失败: %w", err)
 	}
-	scratch = filepath.Join(scratchDir, fmt.Sprintf("job-%d.dump", jobID))
-
-	log.Printf("执行 pg_dump ...")
-	res, err := pg.Dump(runCtx, pg.DumpOptions{
-		Bin: bin, Major: major, Conn: conn, OutPath: scratch,
-		Compress: zipArg, LockWaitSeconds: 30,
-		OnLog: func(line string) {
-			if strings.TrimSpace(line) != "" {
-				log.Printf("%s", line)
-			}
-		},
-	})
+	ext := ".dump"
+	major := 0
+	var res *pg.DumpResult
+	onLog := func(line string) {
+		if strings.TrimSpace(line) != "" {
+			log.Printf("%s", line)
+		}
+	}
+	if target.Engine == domain.EnginePostgres {
+		bin, clientMajor, pickErr := r.Tools.Pick(info.Major)
+		if pickErr != nil {
+			return failf(pg.ErrToolMissing, "%s", pickErr)
+		}
+		major = clientMajor
+		zipArg, actualZip, zipErr := pg.CompressArg(p.Compression, major)
+		if zipErr != nil {
+			return failf("CONFIG", "%s", zipErr)
+		}
+		if actualZip != p.Compression {
+			log.Printf("[warn] 压缩调整为 %s", actualZip)
+		}
+		log.Printf("使用 %s（主版本 %d），压缩 %s", filepath.Base(bin), major, actualZip)
+		scratch = filepath.Join(scratchDir, fmt.Sprintf("job-%d%s", jobID, ext))
+		res, err = pg.Dump(runCtx, pg.DumpOptions{Bin: bin, Major: major, Conn: conn, OutPath: scratch, Compress: zipArg, LockWaitSeconds: 30, OnLog: onLog})
+	} else {
+		tool, pickErr := r.MySQLTools.Pick(target.Engine, info.Version)
+		if pickErr != nil {
+			return failf(pg.ErrToolMissing, "%s", pickErr)
+		}
+		if checkErr := mysql.CheckTransactionalTables(runCtx, target, pw); checkErr != nil {
+			return failf("PREFLIGHT", "%s", checkErr)
+		}
+		if p.DumpFormat != domain.FormatSQL || p.VerifyMode == "toc" {
+			return failf("CONFIG", "MySQL/MariaDB 需要 SQL 格式和校验和校验")
+		}
+		ext = ".sql"
+		if p.Compression != "none" {
+			ext += ".gz"
+		}
+		scratch = filepath.Join(scratchDir, fmt.Sprintf("job-%d%s", jobID, ext))
+		log.Printf("使用 %s %s，压缩 %s；备份期间请勿执行 DDL", filepath.Base(tool.Path), tool.Version, p.Compression)
+		res, err = mysql.Dump(runCtx, tool, target, pw, scratch, p.Compression, onLog)
+	}
 	if err != nil {
 		return err
 	}
@@ -318,8 +355,11 @@ func (r *Runner) Run(ctx context.Context, jobID int64) (retErr error) {
 		float64(res.SizeBytes)/1024/1024, float64(res.DurationMS)/1000, res.SHA256[:16])
 
 	// 5) 上传（可选加密）
-	objKey, objSize, err := r.upload(ctx, jobID, target.ID, scratch, p.Encrypt)
+	objKey, objSize, err := r.upload(runCtx, jobID, target.ID, target.Engine, ext, scratch, p.Encrypt)
 	if err != nil {
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			return failf("TIMEOUT", "上传期间超时")
+		}
 		return failf("UPLOAD_FAILED", "%s", err.Error())
 	}
 	if _, err := r.Store.CreateArtifact(ctx, jobID, objKey, objSize, res.SHA256, p.Encrypt); err != nil {
@@ -329,6 +369,12 @@ func (r *Runner) Run(ctx context.Context, jobID int64) (retErr error) {
 
 	// 6) 校验
 	verr := r.verify(runCtx, jobID, scratch, major, p.VerifyMode, log)
+	if runCtx.Err() != nil {
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			return failf("TIMEOUT", "校验期间超时")
+		}
+		return failf("CANCELED", "任务已取消")
+	}
 
 	_ = r.Store.FinishJob(ctx, jobID, store.JobResult{
 		Status: domain.JobSuccess, SizeBytes: res.SizeBytes, SHA256: res.SHA256,
@@ -373,8 +419,8 @@ func (r *Runner) acquireTargetLock(ctx context.Context, targetID int64) (func(),
 	}, true, nil
 }
 
-func (r *Runner) upload(ctx context.Context, jobID, targetID int64, path string, encrypt bool) (string, int64, error) {
-	key := fmt.Sprintf("postgres/%d/%s/%d.dump", targetID, time.Now().Format("2006/01"), jobID)
+func (r *Runner) upload(ctx context.Context, jobID, targetID int64, engine, extension, path string, encrypt bool) (string, int64, error) {
+	key := fmt.Sprintf("%s/%d/%s/%d%s", engine, targetID, time.Now().Format("2006/01"), jobID, extension)
 	if encrypt {
 		key += ".enc"
 	}

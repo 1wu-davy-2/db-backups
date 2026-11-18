@@ -6,6 +6,7 @@ const NAV: { key: View; label: string }[] = [
   { key: 'targets', label: '目标库' },
   { key: 'policies', label: '备份策略' },
   { key: 'jobs', label: '备份任务' },
+  { key: 'explorer', label: '数据浏览' },
   { key: 'audit', label: '审计日志' },
 ]
 
@@ -25,7 +26,7 @@ export default function Layout({ user, view, onView, onLogout, children }: Props
           <div className="brand-mark">DB</div>
           <div>
             <div className="brand-name">DBBackups</div>
-            <div className="brand-sub">PostgreSQL 备份平台</div>
+            <div className="brand-sub">多引擎备份平台</div>
           </div>
         </div>
 

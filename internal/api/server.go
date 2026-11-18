@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -17,6 +18,7 @@ import (
 	"github.com/weigong/dbbackups/internal/auth"
 	"github.com/weigong/dbbackups/internal/backup"
 	"github.com/weigong/dbbackups/internal/domain"
+	"github.com/weigong/dbbackups/internal/mysql"
 	"github.com/weigong/dbbackups/internal/pg"
 	"github.com/weigong/dbbackups/internal/secrets"
 	"github.com/weigong/dbbackups/internal/storage"
@@ -35,6 +37,7 @@ type Server struct {
 	Store        *store.Store
 	Keys         *secrets.Keyring
 	Tools        *pg.Toolchain
+	MySQLTools   *mysql.Toolchain
 	Runner       *backup.Runner
 	Sched        *backup.Scheduler
 	Logs         *backup.LogHub
@@ -43,6 +46,8 @@ type Server struct {
 	WebDir       string
 	SecureCookie bool
 	SessionTTL   time.Duration
+	queryMu      sync.Mutex
+	queries      map[int64]exploration
 }
 
 func (s *Server) Router() http.Handler {
@@ -75,6 +80,8 @@ func (s *Server) Router() http.Handler {
 			r.Delete("/targets/{id}", s.handleDeleteTarget)
 			r.Post("/targets/{id}/test", s.handleTestTarget)
 			r.Post("/targets/{id}/backup", s.handleManualBackup)
+			r.Post("/targets/{id}/explore", s.handleExplore)
+			r.Post("/targets/{id}/explore/cancel", s.handleCancelExplore)
 
 			r.Get("/policies", s.handleListPolicies)
 			r.Post("/policies", s.handleCreatePolicy)

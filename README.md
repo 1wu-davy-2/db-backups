@@ -1,8 +1,8 @@
 # DBBackups
 
-PostgreSQL 备份调度平台。Go + React，单二进制 + 静态前端，面向"多库、定时、可验证"的日常备份场景。
+PostgreSQL / MySQL / MariaDB 备份调度与只读数据浏览平台。Go + React，单二进制 + 静态前端，面向多库、定时、可验证的日常备份场景。
 
-> 当前为 **M1 里程碑**：逻辑备份全链路已打通。物理备份 / PITR / MySQL 在路线图中。
+> 支持三种引擎的整库逻辑备份；元数据库仍使用 PostgreSQL。物理备份 / PITR 在路线图中。
 
 ---
 
@@ -35,7 +35,9 @@ PostgreSQL 备份调度平台。Go + React，单二进制 + 静态前端，面�
 | 对象存储 S3 / OSS / COS | M2 |
 | 恢复向导、自动恢复演练（L3） | M3 |
 | 物理备份 + WAL + PITR | M4 |
-| MySQL / MariaDB | M4 |
+| MySQL / MariaDB 整库 SQL 备份（gzip / 不压缩） | 支持，需安装匹配客户端 |
+| 表名筛选、结构与索引、数据分页及条件筛选 | 支持三种引擎 |
+| 只读 SELECT、执行限制、取消及摘要审计 | admin / operator 可用 |
 
 ## 3. 快速开始
 
@@ -96,6 +98,18 @@ Docker 镜像已并列安装 15~18 四个版本。本机裸跑时可用 `backupd
 - pgBackRest / Barman / WAL-G 等主流工具同样要求安装匹配的客户端，本项目的 **Docker 形态已经内置四个版本**，属于开箱即用。
 - 本机裸跑的解决办法：设 `BACKUP_PG_BIN_DIRS`（可多个目录，逗号分隔），或把便携版放到 `$BACKUP_DATA_DIR/pgclient/<版本>/bin`。找不到时报错会列出所有探测过的路径和三种修复方式。
 
+### 3.4 MySQL / MariaDB 客户端
+
+选择目标库类型后，端口默认 3306。服务端需安装对应的 `mysqldump` / `mariadb-dump`，设置 `BACKUP_MYSQL_BIN_DIRS`（逗号分隔目录），或放到 `$BACKUP_DATA_DIR/mysqlclient/<版本>/bin`，重启后可在总览查看探测结果。
+
+- 必须同厂商、同主次版本系列，例如 MySQL 8.0 对应 MySQL 8.0 客户端；不使用 MariaDB 客户端替代 MySQL。
+- 当前 Docker 镜像仅内置 PostgreSQL 客户端。MySQL/MariaDB 需挂载对应 Linux 客户端及其依赖，再设置上述变量；不能直接挂载 Windows 程序。
+- 使用单事务整库 SQL 导出，包含表、视图、触发器、例程和事件；检测到非 InnoDB 表会拒绝备份，执行期间请勿修改表结构。
+- 源库账号需本库 `SELECT`、`SHOW VIEW`、`TRIGGER`、`EVENT`，以及该版本读取例程定义的权限（如 MySQL 8 的 `SHOW_ROUTINE`、MariaDB 11.4 的 `SHOW CREATE ROUTINE`）。不要使用超级管理员或授予 `FILE` 权限。
+- SQL 导出支持 gzip 或不压缩；不支持 zstd、TOC 校验。SHA-256 不等价于恢复演练，仍需定期在隔离库验证恢复。
+- 恢复时建议在独立实例保留原库名；触发器、视图或例程可能包含原库名和 `DEFINER`，仅更改导入库名不保证重定向这些对象，恢复账号也需相应权限。
+- TLS 默认校验证书；仅可信本地测试环境选择 `disable`。
+
 ## 4. 使用流程
 
 1. **添加目标库**：填连接信息 → 保存时真连一次，失败不允许保存。建议用只读账号：
@@ -109,7 +123,13 @@ GRANT pg_read_all_data TO backup_ro;   -- PG 14+
 
 3. **等执行或手动触发**：任务详情页有实时日志，包含 pg_dump 的 `--verbose` 输出。
 
-4. **取回备份**：任务详情 → 下载。加密备份由服务端解密后流式输出。
+4. **取回备份**：任务详情 → 下载。加密备份由服务端解密后流式输出，PostgreSQL 为 `.dump`，MySQL/MariaDB 为 `.sql.gz` 或 `.sql`。
+
+5. **数据浏览**：选择目标库 → 连接并加载表 → 筛选表名、查看结构和索引、分页或按列筛选数据；也可执行单条只读 SELECT。筛选仅用于浏览，不改变整库备份范围。
+
+数据浏览仅对管理员和操作员开放：数据库只读事务，单次执行 10 秒、API 总时限 15 秒，最多 500 行 / 2 MiB，每用户同时一个请求、每服务进程最多四个。支持取消，审计保存 SQL 的 SHA-256 而非正文或结果。首版不支持 CTE、注释、写入、锁或自定义函数；表列表最多 2000 项，无主键表的分页顺序不保证稳定。
+
+只读事务与语法限制不是不可信数据库代码的安全沙箱；视图、自定义类型或数据库扩展仍可能执行服务端代码。请使用受信任数据库及最小权限账号，权限仅授予需要访问的库；尤其 MySQL/MariaDB 的连接库名本身不构成跨库访问隔离。
 
 ## 5. 关键设计
 
@@ -136,7 +156,7 @@ GRANT pg_read_all_data TO backup_ro;   -- PG 14+
 ### 5.3 凭据与文件加密
 
 - 数据库密码：AES-256-GCM 加密存 `targets.password_enc`，主密钥来自 `BACKUP_MASTER_KEY` 或 `$DATA_DIR/master.key`（0600）
-- 子进程传参：密码只经 `cmd.Env` 的 `PGPASSWORD`，不出现在 argv（`ps` 可见）与日志中
+- 子进程传参：PG 使用 `PGPASSWORD`；MySQL/MariaDB 使用临时私有目录中的客户端配置，执行后移除。密码不放入 argv；Windows 部署应额外限制数据目录 ACL
 - 备份文件：分块 AEAD（1 MiB/块，每文件独立派生密钥，块序号作 nonce 与 AAD），末尾写结束标记，截断会被检测
 - 加密只是"落盘保护"，传输安全依赖 HTTPS
 
@@ -163,6 +183,7 @@ GRANT pg_read_all_data TO backup_ro;   -- PG 14+
 | `BACKUP_SESSION_TTL_DAYS` | `7` | 会话有效期 |
 | `BACKUP_COOKIE_SECURE` | `0` | HTTPS 部署时置 1 |
 | `BACKUP_PG_BIN_DIRS` | 空 | 额外 pg_dump 搜索目录 |
+| `BACKUP_MYSQL_BIN_DIRS` | 空 | MySQL/MariaDB 客户端目录，逗号分隔 |
 
 ## 7. API 摘要
 
@@ -175,6 +196,8 @@ GET  /api/targets                   目标库列表
 POST /api/targets                   新增（保存前探测）
 POST /api/targets/{id}/test         连接测试
 POST /api/targets/{id}/backup       立即备份
+POST /api/targets/{id}/explore      表列表 / 结构 / 数据 / SELECT
+POST /api/targets/{id}/explore/cancel 取消自己的指定查询
 
 GET  /api/policies                  策略列表
 POST /api/policies                  新建（cron 校验）
@@ -212,7 +235,7 @@ go vet ./...
 ## 10. 已知限制
 
 - 一个目标库只能有一条策略（避免多策略保留规则互相覆盖）
-- 仅支持 `-Fc` 单文件格式；`-Fd` 并行目录格式未实现
+- PostgreSQL 仅支持 `-Fc` 单文件；MySQL/MariaDB 使用 SQL 单文件；不支持并行目录格式
 - 逻辑备份适合单库 ≤ 200 GB；更大的库需要物理备份（M4）
 - 不支持跨库一致性快照
 - 恢复目前只提供下载，尚未提供"一键恢复到指定实例"（M3）

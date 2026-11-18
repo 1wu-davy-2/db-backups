@@ -131,6 +131,10 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "任务已结束，无法取消")
 		return
 	}
+	if err := s.Store.CancelPendingJob(r.Context(), id); err != nil {
+		writeErr(w, http.StatusInternalServerError, "取消排队任务失败")
+		return
+	}
 	s.Runner.Cancel(id)
 	s.audit(r, "job.cancel", "job:"+itoa(id), nil)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -176,10 +180,14 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 
-	name := fmt.Sprintf("%s-job%d.dump", sanitizeName(a.TargetName), a.JobID)
-	if a.Encrypted {
-		name += ".enc"
+	ext := ".dump"
+	key := strings.TrimSuffix(a.ObjectKey, ".enc")
+	if strings.HasSuffix(key, ".sql.gz") {
+		ext = ".sql.gz"
+	} else if strings.HasSuffix(key, ".sql") {
+		ext = ".sql"
 	}
+	name := fmt.Sprintf("%s-job%d%s", sanitizeName(a.TargetName), a.JobID, ext)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(
 		`attachment; filename="%s"; filename*=UTF-8''%s`, name, url.PathEscape(name)))

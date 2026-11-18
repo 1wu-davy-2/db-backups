@@ -27,6 +27,7 @@ services:
       BACKUP_MASTER_KEY: ${BACKUP_MASTER_KEY:-}
       BACKUP_DATA_DIR: /data
       BACKUP_MAX_CONCURRENT: "4"
+      BACKUP_MYSQL_BIN_DIRS: ${BACKUP_MYSQL_BIN_DIRS:-}
       TZ: Asia/Shanghai
     ports:
       - "8080:8080"

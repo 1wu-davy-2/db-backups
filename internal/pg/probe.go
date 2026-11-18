@@ -2,7 +2,10 @@ package pg
 
 import (
 	"context"
+	"database/sql"
+
 	"fmt"
+	"github.com/jackc/pgx/v5/stdlib"
 	"net"
 	"net/url"
 	"strconv"
@@ -46,6 +49,21 @@ func (c ConnInfo) dsn() (string, error) {
 	q.Set("application_name", "dbbackups")
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+func (c ConnInfo) Open() (*sql.DB, error) {
+	dsn, err := c.dsn()
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	db := stdlib.OpenDB(*cfg)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
+	return db, nil
 }
 
 // Redacted 用于日志与错误信息，避免密码外泄。

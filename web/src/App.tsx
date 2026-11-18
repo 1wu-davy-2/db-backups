@@ -8,6 +8,7 @@ import Jobs from './pages/Jobs'
 import Login from './pages/Login'
 import Policies from './pages/Policies'
 import Targets from './pages/Targets'
+import Explorer from './pages/Explorer'
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null)
@@ -15,9 +16,11 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState<View>('dashboard')
   const [jobID, setJobID] = useState<number | null>(null)
+  const [targetID, setTargetID] = useState<number | null>(null)
 
   function navigate(next: View) {
     setJobID(null)
+    setTargetID(null)
     setView(next)
   }
 
@@ -80,7 +83,8 @@ export default function App() {
       }}
     >
       {view === 'dashboard' && <Dashboard onView={navigate} onJob={openJob} />}
-      {view === 'targets' && <Targets user={user} onJob={openJob} />}
+      {view === 'targets' && <Targets user={user} onJob={openJob} onExplore={(id) => { setTargetID(id); setView('explorer') }} />}
+      {view === 'explorer' && <Explorer user={user} initialTargetID={targetID} />}
       {view === 'policies' && <Policies user={user} />}
       {view === 'jobs' && <Jobs user={user} initialJobID={jobID} />}
       {view === 'audit' && <Audit />}

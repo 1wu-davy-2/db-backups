@@ -61,12 +61,19 @@ export default function Policies({ user }: { user: User }) {
     void load()
   }, [])
 
+  const isPG = targets.find((t) => t.id === form.target_id)?.engine === 'postgres'
+  function engineDefaults(id: number) {
+    return targets.find((t) => t.id === id)?.engine === 'postgres'
+      ? { compression: 'zstd:5', verify_mode: 'toc' }
+      : { compression: 'gzip:6', verify_mode: 'checksum' }
+  }
+
   const usedTargets = useMemo(() => new Set(list.map((p) => p.target_id)), [list])
 
   function openCreate() {
     const free = targets.find((t) => !usedTargets.has(t.id))
     setEditing(null)
-    setForm({ ...EMPTY, target_id: free?.id ?? 0 })
+    setForm({ ...EMPTY, ...engineDefaults(free?.id ?? 0), target_id: free?.id ?? 0 })
     setFormErr('')
     setShowForm(true)
   }
@@ -110,7 +117,7 @@ export default function Policies({ user }: { user: User }) {
         target_id: Number(form.target_id),
         cron_expr: form.cron_expr.trim(),
         timezone: form.timezone,
-        dump_format: 'custom',
+        dump_format: isPG ? 'custom' : 'sql',
         compression: form.compression,
         encrypt: form.encrypt,
         retain_count: Number(form.retain_count) || 0,
@@ -262,7 +269,7 @@ export default function Policies({ user }: { user: User }) {
               <div className="field">
                 <label className="label" htmlFor="policy-target">目标库</label>
                 <select id="policy-target" className="select" value={form.target_id} disabled={!!editing}
-                  onChange={(e) => setForm({ ...form, target_id: Number(e.target.value) })}>
+                  onChange={(e) => setForm({ ...form, ...engineDefaults(Number(e.target.value)), target_id: Number(e.target.value) })}>
                   <option value={0}>请选择</option>
                   {availableTargets.map((t) => <option key={t.id} value={t.id}>{t.name}（{t.host}/{t.dbname}）</option>)}
                 </select>
@@ -323,18 +330,18 @@ export default function Policies({ user }: { user: User }) {
                   <label className="label" htmlFor="policy-compression">压缩</label>
                   <select id="policy-compression" className="select" value={form.compression}
                     onChange={(e) => setForm({ ...form, compression: e.target.value })}>
-                    <option value="zstd:5">zstd:5（推荐）</option>
-                    <option value="zstd:9">zstd:9（更小更慢）</option>
+                    {isPG && <><option value="zstd:5">zstd:5（推荐）</option>
+                    <option value="zstd:9">zstd:9（更小更慢）</option></>}
                     <option value="gzip:6">gzip:6</option>
                     <option value="none">不压缩</option>
                   </select>
-                  <div className="hint">zstd 需要 PG 16+ 客户端，低版本会自动回退 gzip</div>
+                  <div className="hint">{isPG ? 'zstd 需要 PG 16+ 客户端，低版本会自动回退 gzip' : '整库 SQL 导出，仅支持 InnoDB 一致性快照；备份期间请勿执行 DDL'}</div>
                 </div>
                 <div className="field">
                   <label className="label" htmlFor="policy-verify">备份后校验</label>
                   <select id="policy-verify" className="select" value={form.verify_mode}
                     onChange={(e) => setForm({ ...form, verify_mode: e.target.value })}>
-                    <option value="toc">解析归档目录（TOC）</option>
+                    {isPG && <option value="toc">解析归档目录（TOC）</option>}
                     <option value="checksum">仅校验和</option>
                     <option value="none">不校验</option>
                   </select>

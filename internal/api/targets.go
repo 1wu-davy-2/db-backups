@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -8,11 +9,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/weigong/dbbackups/internal/domain"
+	"github.com/weigong/dbbackups/internal/mysql"
 	"github.com/weigong/dbbackups/internal/pg"
 	"github.com/weigong/dbbackups/internal/store"
 )
 
 type targetReq struct {
+	Engine    string   `json:"engine"`
 	Name      string   `json:"name"`
 	Host      string   `json:"host"`
 	Port      int      `json:"port"`
@@ -41,19 +44,40 @@ func (t *targetReq) normalize() error {
 	if t.Username == "" {
 		return errors.New("用户名必填")
 	}
+	if t.Engine == "" {
+		t.Engine = domain.EnginePostgres
+	}
+	switch t.Engine {
+	case domain.EnginePostgres, domain.EngineMySQL, domain.EngineMariaDB:
+	default:
+		return errors.New("不支持的数据库类型")
+	}
 	if t.Port == 0 {
 		t.Port = 5432
+		if t.Engine != domain.EnginePostgres {
+			t.Port = 3306
+		}
 	}
 	if t.Port < 1 || t.Port > 65535 {
 		return errors.New("端口非法")
 	}
 	if t.SSLMode == "" {
 		t.SSLMode = "prefer"
+		if t.Engine != domain.EnginePostgres {
+			t.SSLMode = "verify-full"
+		}
 	}
 	if t.Tags == nil {
 		t.Tags = []string{}
 	}
 	return nil
+}
+
+func probeTarget(ctx context.Context, target *domain.Target, password string) (*pg.ServerInfo, error) {
+	if target.Engine == domain.EngineMySQL || target.Engine == domain.EngineMariaDB {
+		return mysql.Probe(ctx, target, password)
+	}
+	return pg.Probe(ctx, pg.ConnInfo{Host: target.Host, Port: target.Port, DBName: target.DBName, User: target.Username, Password: password, SSLMode: target.SSLMode})
 }
 
 func pathID(r *http.Request) (int64, bool) {
@@ -106,16 +130,13 @@ func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		enabled = *req.IsEnabled
 	}
 	t := &domain.Target{
-		Name: req.Name, Engine: domain.EnginePostgres, Host: req.Host, Port: req.Port,
+		Name: req.Name, Engine: req.Engine, Host: req.Host, Port: req.Port,
 		DBName: req.DBName, Username: req.Username, SSLMode: req.SSLMode,
 		Tags: req.Tags, IsEnabled: enabled,
 	}
 
 	// 创建前先真连一次：避免把连不上的配置存进库，等到凌晨备份时才炸。
-	info, err := pg.Probe(r.Context(), pg.ConnInfo{
-		Host: t.Host, Port: t.Port, DBName: t.DBName, User: t.Username,
-		Password: req.Password, SSLMode: t.SSLMode,
-	})
+	info, err := probeTarget(r.Context(), t, req.Password)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "连接测试失败："+err.Error())
 		return
@@ -181,10 +202,11 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	info, err := pg.Probe(r.Context(), pg.ConnInfo{
-		Host: req.Host, Port: req.Port, DBName: req.DBName, User: req.Username,
-		Password: password, SSLMode: req.SSLMode,
-	})
+	if req.Engine != existing.Engine {
+		writeErr(w, http.StatusBadRequest, "不能更改已有目标库的类型，请创建新目标库")
+		return
+	}
+	info, err := probeTarget(r.Context(), &domain.Target{Engine: req.Engine, Host: req.Host, Port: req.Port, DBName: req.DBName, Username: req.Username, SSLMode: req.SSLMode}, password)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "连接测试失败："+err.Error())
 		return
@@ -196,7 +218,7 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		enabled = *req.IsEnabled
 	}
 	upd := &domain.Target{
-		ID: id, Name: req.Name, Engine: domain.EnginePostgres, Host: req.Host, Port: req.Port,
+		ID: id, Name: req.Name, Engine: req.Engine, Host: req.Host, Port: req.Port,
 		DBName: req.DBName, Username: req.Username, SSLMode: req.SSLMode,
 		Tags: req.Tags, IsEnabled: enabled,
 	}
@@ -264,10 +286,7 @@ func (s *Server) handleTestTarget(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "凭据解密失败")
 		return
 	}
-	info, err := pg.Probe(r.Context(), pg.ConnInfo{
-		Host: t.Host, Port: t.Port, DBName: t.DBName, User: t.Username,
-		Password: pw, SSLMode: t.SSLMode,
-	})
+	info, err := probeTarget(r.Context(), t, pw)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "连接失败："+err.Error())
 		return

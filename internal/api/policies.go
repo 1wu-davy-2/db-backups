@@ -7,6 +7,8 @@ import (
 
 	"github.com/weigong/dbbackups/internal/backup"
 	"github.com/weigong/dbbackups/internal/domain"
+	"github.com/weigong/dbbackups/internal/mysql"
+	"github.com/weigong/dbbackups/internal/pg"
 	"github.com/weigong/dbbackups/internal/store"
 )
 
@@ -27,7 +29,7 @@ type policyReq struct {
 	IsEnabled      *bool  `json:"is_enabled"`
 }
 
-func (p *policyReq) normalize() error {
+func (p *policyReq) normalize(engine string) error {
 	p.CronExpr = strings.TrimSpace(p.CronExpr)
 	if p.CronExpr == "" {
 		return errors.New("cron 表达式必填")
@@ -35,14 +37,33 @@ func (p *policyReq) normalize() error {
 	if p.Timezone == "" {
 		p.Timezone = "Asia/Shanghai"
 	}
-	if p.DumpFormat == "" {
-		p.DumpFormat = domain.FormatCustom
+	format, compression, verify := domain.FormatCustom, "zstd:5", "toc"
+	if engine != domain.EnginePostgres {
+		format, compression, verify = domain.FormatSQL, "gzip:6", "checksum"
 	}
-	if p.DumpFormat != domain.FormatCustom {
-		return errors.New("当前版本仅支持 custom 格式（-Fc）")
+	if p.DumpFormat == "" {
+		p.DumpFormat = format
+	}
+	if p.DumpFormat != format {
+		return errors.New("该引擎仅支持 " + format + " 格式")
 	}
 	if p.Compression == "" {
-		p.Compression = "zstd:5"
+		p.Compression = compression
+	}
+	if engine == domain.EnginePostgres {
+		if _, _, err := pg.CompressArg(p.Compression, 18); err != nil {
+			return err
+		}
+	} else {
+		if _, err := mysql.CompressionLevel(p.Compression); err != nil {
+			return err
+		}
+		if p.VerifyMode == "toc" {
+			return errors.New("SQL 导出不支持 TOC 校验")
+		}
+	}
+	if p.VerifyMode == "" {
+		p.VerifyMode = verify
 	}
 	if p.RetainCount <= 0 && p.RetainDays <= 0 && p.RetainMaxBytes <= 0 {
 		return errors.New("保留策略至少设置一项：份数 / 天数 / 容量上限")
@@ -93,17 +114,17 @@ func (s *Server) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := req.normalize(); err != nil {
+	t, err := s.Store.GetTarget(r.Context(), req.TargetID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "目标库不存在")
+		return
+	}
+	if err := req.normalize(t.Engine); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := backup.ValidateCron(req.CronExpr, req.Timezone); err != nil {
 		writeErr(w, http.StatusBadRequest, "cron 表达式非法："+err.Error())
-		return
-	}
-	t, err := s.Store.GetTarget(r.Context(), req.TargetID)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "目标库不存在")
 		return
 	}
 
@@ -170,7 +191,16 @@ func (s *Server) handleUpdatePolicy(w http.ResponseWriter, r *http.Request) {
 	if req.TargetID == 0 {
 		req.TargetID = existing.TargetID
 	}
-	if err := req.normalize(); err != nil {
+	if req.TargetID != existing.TargetID {
+		writeErr(w, http.StatusBadRequest, "不能更改策略所属目标库")
+		return
+	}
+	t, err := s.Store.GetTarget(r.Context(), req.TargetID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "目标库不存在")
+		return
+	}
+	if err := req.normalize(t.Engine); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

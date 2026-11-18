@@ -1,6 +1,6 @@
 export type Role = 'admin' | 'operator' | 'viewer'
 
-export type View = 'dashboard' | 'targets' | 'policies' | 'jobs' | 'audit'
+export type View = 'dashboard' | 'targets' | 'policies' | 'jobs' | 'audit' | 'explorer'
 
 export interface User {
   id: number
@@ -118,10 +118,16 @@ export interface ToolInfo {
 export interface SystemInfo {
   version: string
   toolchain: ToolInfo[]
+  mysql_toolchain?: (ToolInfo & { engine: string; minor: number })[]
   storage: string
   data_dir: string
   encryption: string
 }
+
+export interface DBTable { schema: string; name: string; kind: string }
+export interface DBColumn { name: string; type: string; nullable: boolean; default: string; primary: boolean }
+export interface DBStructure { columns: DBColumn[]; indexes: { name: string; definition: string }[] }
+export interface QueryResult { columns: string[]; rows: unknown[][]; truncated: boolean; duration_ms: number }
 
 export interface Page<T> {
   items: T[]

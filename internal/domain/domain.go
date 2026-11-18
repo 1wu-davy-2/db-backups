@@ -5,6 +5,7 @@ import "time"
 const (
 	EnginePostgres = "postgres"
 	EngineMySQL    = "mysql"
+	EngineMariaDB  = "mariadb"
 )
 
 const (
@@ -27,8 +28,8 @@ const (
 	RoleViewer   = "viewer"
 )
 
-// DumpFormat 目前只支持 custom（-Fc）。
 const (
+	FormatSQL       = "sql"
 	FormatCustom    = "custom"
 	FormatDirectory = "directory"
 )

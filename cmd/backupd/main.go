@@ -15,6 +15,7 @@ import (
 	"github.com/weigong/dbbackups/internal/api"
 	"github.com/weigong/dbbackups/internal/backup"
 	"github.com/weigong/dbbackups/internal/config"
+	"github.com/weigong/dbbackups/internal/mysql"
 	"github.com/weigong/dbbackups/internal/pg"
 	"github.com/weigong/dbbackups/internal/secrets"
 	"github.com/weigong/dbbackups/internal/storage"
@@ -40,6 +41,16 @@ func main() {
 		fmt.Printf("已探测 %d 个路径：\n", len(tc.Searched()))
 		for _, p := range tc.Searched() {
 			fmt.Printf("  %s\n", p)
+		}
+		my := mysql.NewToolchain(config.MySQLBinDirs(dataDir, os.Getenv("BACKUP_MYSQL_BIN_DIRS")))
+		for _, tool := range my.List() {
+			fmt.Printf("  %s %s  %s\n", tool.Engine, tool.Version, tool.Path)
+		}
+		if len(my.List()) == 0 {
+			fmt.Println("未发现 MySQL/MariaDB 客户端，请设置 BACKUP_MYSQL_BIN_DIRS（同厂商、同 major.minor 系列）")
+		}
+		for _, path := range my.Searched() {
+			fmt.Printf("  %s\n", path)
 		}
 		return
 	}
@@ -72,6 +83,7 @@ func main() {
 	}
 
 	tools := pg.NewToolchain(cfg.PgBinDirs)
+	mysqlTools := mysql.NewToolchain(cfg.MySQLBinDirs)
 	if list := tools.List(); len(list) == 0 {
 		slog.Warn("未发现 pg_dump，备份将无法执行；请安装 postgresql-client 或设置 BACKUP_PG_BIN_DIRS")
 	} else {
@@ -87,7 +99,7 @@ func main() {
 	}
 
 	logs := backup.NewLogHub()
-	runner := backup.NewRunner(st, keys, tools, blob, logs, cfg.DataDir, cfg.MaxConcurrent)
+	runner := backup.NewRunner(st, keys, tools, mysqlTools, blob, logs, cfg.DataDir, cfg.MaxConcurrent)
 	sched := backup.NewScheduler(st, runner, func(msg string) {
 		slog.Info("scheduler", "msg", msg)
 	})
@@ -107,7 +119,7 @@ func main() {
 	}
 
 	srv := &api.Server{
-		Store: st, Keys: keys, Tools: tools, Runner: runner, Sched: sched, Logs: logs,
+		Store: st, Keys: keys, Tools: tools, MySQLTools: mysqlTools, Runner: runner, Sched: sched, Logs: logs,
 		Blob: blob, DataDir: cfg.DataDir, WebDir: webDir,
 		SecureCookie: os.Getenv("BACKUP_COOKIE_SECURE") == "1",
 		SessionTTL:   time.Duration(cfg.SessionTTLDay) * 24 * time.Hour,

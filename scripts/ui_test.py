@@ -44,6 +44,10 @@ class PageOperations(unittest.TestCase):
         self.policies = []
         self.jobs = [dict(JOB, id=i) for i in range(51, 0, -1)]
         self.tools = [dict(major=17, version='17.6', path='C:/PostgreSQL/17/bin/pg_dump.exe')]
+        self.mysql_tools = []
+        self.explore_bodies = []
+        self.source_tables = [dict(schema='public', name='orders', kind='BASE TABLE')]
+        self.query_result = dict(columns=['id', 'name'], rows=[['1', '<script>unsafe</script>'], ['2', None]], truncated=False, duration_ms=3)
         self.failures = {}
         self.hold = set()
         self.held = []
@@ -85,7 +89,7 @@ class PageOperations(unittest.TestCase):
             return self.reply(route, [dict(day='2026-11-17', total=51, success=51)])
         if path == '/system/info':
             return self.reply(route, dict(version='0.1.0-m1', toolchain=self.tools, storage='local',
-                                         data_dir='./data', encryption='AES-256-GCM'))
+                                         data_dir='./data', encryption='AES-256-GCM', mysql_toolchain=self.mysql_tools))
         if path == '/targets' and request.method == 'GET':
             return self.reply(route, self.targets)
         if path == '/targets' and request.method == 'POST':
@@ -104,6 +108,16 @@ class PageOperations(unittest.TestCase):
             created = dict(JOB, id=52, status='running', finished_at=None)
             self.jobs.insert(0, created)
             return self.reply(route, created, 201)
+        if path == '/targets/1/explore/cancel':
+            return self.reply(route, {'ok': True})
+        if path == '/targets/1/explore':
+            body = request.post_data_json
+            self.explore_bodies.append(body)
+            if body['action'] == 'tables':
+                return self.reply(route, self.source_tables)
+            if body['action'] == 'structure':
+                return self.reply(route, dict(columns=[dict(name='id', type='integer', nullable=False, default='', primary=True), dict(name='name', type='text', nullable=True, default='', primary=False)], indexes=[dict(name='orders_pkey', definition='PRIMARY KEY (id)')]))
+            return self.reply(route, self.query_result)
         if path == '/policies':
             if request.method == 'POST':
                 policy = dict(request.post_data_json, id=1, target_name='订单库', next_run_at=STAMP)
@@ -158,6 +172,120 @@ class PageOperations(unittest.TestCase):
         self.page.get_by_placeholder('appdb').fill('orders')
         self.page.get_by_placeholder('backup_ro').fill('backup_ro')
         self.page.locator('input[type="password"]').fill('ui-test-password')
+
+    def test_mysql_target_defaults(self):
+        self.open('目标库')
+        self.page.get_by_role('button', name='添加目标库', exact=True).click()
+        self.page.get_by_label('数据库类型', exact=True).select_option('mysql')
+        expect(self.page.get_by_label('端口', exact=True)).to_have_value('3306')
+        expect(self.page.get_by_label('SSL 模式', exact=True)).to_have_value('verify-full')
+        self.fill_target()
+        self.page.get_by_role('button', name='连接测试并保存', exact=True).click()
+        expect(self.page.get_by_role('dialog')).not_to_be_visible()
+        self.assertEqual(self.targets[-1]['engine'], 'mysql')
+
+    def test_mysql_policy_uses_sql_defaults(self):
+        self.targets[0]['engine'] = 'mariadb'
+        self.open('备份策略')
+        self.page.get_by_role('button', name='新建策略', exact=True).click()
+        expect(self.page.get_by_label('压缩', exact=True)).to_have_value('gzip:6')
+        expect(self.page.get_by_label('备份后校验', exact=True)).to_have_value('checksum')
+        self.page.get_by_role('button', name='保存策略', exact=True).click()
+        expect(self.page.get_by_role('dialog')).not_to_be_visible()
+        self.assertEqual(self.policies[0]['dump_format'], 'sql')
+
+    def test_explorer_viewer_is_blocked(self):
+        self.role = 'viewer'
+        self.open('数据浏览')
+        expect(self.page.get_by_text('数据浏览仅对管理员和操作员开放')).to_be_visible()
+
+    def test_mysql_toolchain_diagnostics(self):
+        self.mysql_tools = [dict(engine='mysql', major=8, minor=0, version='8.0.44', path='/tools/mysqldump')]
+        self.open()
+        expect(self.page.get_by_text('mysql 8.0.44', exact=True)).to_be_visible()
+        expect(self.page.get_by_text('BACKUP_MYSQL_BIN_DIRS', exact=True)).to_be_visible()
+
+    def open_table(self):
+        self.open('数据浏览')
+        self.page.get_by_role('button', name='连接并加载表', exact=True).click()
+        self.page.locator('.explorer-table').first.click()
+        expect(self.page.get_by_text('偏移 0 · 本页 2 行', exact=True)).to_be_visible()
+
+    def test_explorer_tables_structure_and_safe_cells(self):
+        self.open_table()
+        expect(self.page.get_by_text('<script>unsafe</script>', exact=True)).to_be_visible()
+        expect(self.page.get_by_text('NULL', exact=True)).to_be_visible()
+        self.page.get_by_role('button', name='结构与索引', exact=True).click()
+        expect(self.page.get_by_text('orders_pkey', exact=True)).to_be_visible()
+        self.page.get_by_label('筛选表名', exact=True).fill('missing')
+        expect(self.page.get_by_text('没有匹配的表', exact=True)).to_be_visible()
+        self.assertEqual([b['action'] for b in self.explore_bodies], ['tables', 'structure', 'data'])
+
+    def test_explorer_filter_and_variable_page_history(self):
+        self.query_result['truncated'] = True
+        self.open_table()
+        self.page.get_by_role('button', name='下一页', exact=True).click()
+        expect(self.page.get_by_text('偏移 2 · 本页 2 行', exact=True)).to_be_visible()
+        self.page.get_by_role('button', name='下一页', exact=True).click()
+        expect(self.page.get_by_text('偏移 4 · 本页 2 行', exact=True)).to_be_visible()
+        self.page.get_by_role('button', name='上一页', exact=True).click()
+        expect(self.page.get_by_text('偏移 2 · 本页 2 行', exact=True)).to_be_visible()
+        self.page.get_by_label('筛选列', exact=True).select_option('name')
+        self.page.get_by_label('筛选值', exact=True).fill("';drop table orders;--")
+        self.page.get_by_role('button', name='应用筛选', exact=True).click()
+        expect(self.page.get_by_text('偏移 0 · 本页 2 行', exact=True)).to_be_visible()
+        self.assertEqual(self.explore_bodies[-1]['value'], "';drop table orders;--")
+
+    def test_explorer_query_empty_error_and_cancel(self):
+        self.query_result['rows'] = []
+        self.open('数据浏览')
+        self.page.get_by_role('button', name='SQL 查询', exact=True).click()
+        self.page.get_by_label('只读 SQL', exact=True).fill('SELECT 1 WHERE 1=0')
+        self.page.get_by_role('button', name='执行查询', exact=True).click()
+        expect(self.page.get_by_text('查询成功，没有匹配的数据。', exact=True)).to_be_visible()
+        self.failures[('POST', '/targets/1/explore')] = '仅支持单条 SELECT 查询'
+        self.page.get_by_label('只读 SQL', exact=True).fill('DELETE FROM orders')
+        self.page.get_by_role('button', name='执行查询', exact=True).click()
+        expect(self.page.get_by_role('alert')).to_contain_text('仅支持单条 SELECT 查询')
+        self.hold.add(('POST', '/targets/1/explore'))
+        self.page.get_by_role('button', name='执行查询', exact=True).click()
+        expect(self.page.get_by_label('目标库', exact=True)).to_be_disabled()
+        self.page.get_by_role('button', name='取消查询', exact=True).click()
+        expect(self.page.get_by_text('查询已取消', exact=True)).to_be_visible()
+        self.assertTrue(any(path == '/targets/1/explore/cancel' for _, path, _ in self.requests))
+        for route in self.held:
+            route.abort()
+        self.held.clear()
+
+    def test_explorer_cancel_during_error_response_body(self):
+        self.open('数据浏览')
+        self.page.get_by_role('button', name='SQL 查询', exact=True).click()
+        self.page.evaluate("""() => {
+            const original = window.fetch;
+            window.fetch = async (input, init) => {
+                if (String(input).endsWith('/explore')) {
+                    const response = new Response('', {status: 400});
+                    response.json = () => new Promise((resolve, reject) => {
+                        window.errorBodyStarted = true;
+                        init.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), {once: true});
+                    });
+                    return response;
+                }
+                return original(input, init);
+            };
+        }""")
+        self.page.get_by_role('button', name='执行查询', exact=True).click()
+        self.page.wait_for_function('window.errorBodyStarted === true')
+        self.page.get_by_role('button', name='取消查询', exact=True).click()
+        expect(self.page.get_by_text('查询已取消', exact=True)).to_be_visible()
+        expect(self.page.get_by_role('alert')).not_to_be_visible()
+        expect(self.page.get_by_role('button', name='执行查询', exact=True)).to_be_enabled()
+
+    def test_explorer_mobile_long_values_stay_contained(self):
+        self.page.set_viewport_size({'width': 390, 'height': 844})
+        self.query_result['rows'][0][1] = 'x' * 1000
+        self.open_table()
+        self.assertLessEqual(self.page.evaluate('document.documentElement.scrollWidth'), 390)
 
     def test_new_target_password_is_required(self):
         self.open('目标库')

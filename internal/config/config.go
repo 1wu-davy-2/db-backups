@@ -16,6 +16,7 @@ type Config struct {
 	DataDir       string
 	MasterKeyFile string
 	PgBinDirs     []string
+	MySQLBinDirs  []string
 	SessionTTLDay int
 	MaxConcurrent int
 }
@@ -48,6 +49,7 @@ func Load() (*Config, error) {
 		DataDir:       dataDir,
 		MasterKeyFile: filepath.Join(dataDir, "master.key"),
 		PgBinDirs:     PgBinDirs(dataDir, os.Getenv("BACKUP_PG_BIN_DIRS")),
+		MySQLBinDirs:  MySQLBinDirs(dataDir, os.Getenv("BACKUP_MYSQL_BIN_DIRS")),
 		SessionTTLDay: ttl,
 		MaxConcurrent: conc,
 	}
@@ -55,6 +57,25 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("BACKUP_DATABASE_URL is required, e.g. postgres://user:pass@127.0.0.1:5432/dbbackups?sslmode=disable")
 	}
 	return cfg, nil
+}
+
+func MySQLBinDirs(dataDir, extra string) []string {
+	var out []string
+	for _, dir := range strings.Split(extra, ",") {
+		if dir = strings.TrimSpace(dir); dir != "" {
+			out = append(out, dir)
+		}
+	}
+	patterns := []string{"/usr/bin", "/usr/local/mysql/bin", "/opt/mysql/*/bin", "/opt/mariadb/*/bin", "/opt/homebrew/opt/mysql*/bin", "/opt/homebrew/opt/mariadb*/bin"}
+	if runtime.GOOS == "windows" {
+		patterns = []string{`C:\Program Files\MySQL\*\bin`, `C:\Program Files\MariaDB *\bin`}
+	}
+	patterns = append(patterns, filepath.Join(dataDir, "mysqlclient", "*", "bin"))
+	for _, pattern := range patterns {
+		matches, _ := filepath.Glob(pattern)
+		out = append(out, matches...)
+	}
+	return out
 }
 
 // PgBinDirs 汇总所有 pg_dump 候选目录。

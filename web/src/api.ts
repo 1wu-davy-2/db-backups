@@ -16,8 +16,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     try {
       const body = await res.json()
       if (body?.error) msg = body.error
-    } catch {
-      /* 非 JSON 响应，保留默认文案 */
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') throw e
     }
     throw new Error(msg)
   }
@@ -60,6 +60,11 @@ export const api = {
       `/targets/${id}/test`, { method: 'POST' },
     ),
   backupNow: (id: number) => req<Job>(`/targets/${id}/backup`, { method: 'POST' }),
+
+  explore: <T>(id: number, body: Record<string, unknown>, signal?: AbortSignal) =>
+    req<T>(`/targets/${id}/explore`, { method: 'POST', body: JSON.stringify(body), signal }),
+  cancelExplore: (id: number, requestID: string) =>
+    req<{ ok: boolean }>(`/targets/${id}/explore/cancel`, { method: 'POST', body: JSON.stringify({ request_id: requestID }) }),
 
   policies: () => req<Policy[]>('/policies'),
   createPolicy: (body: Record<string, unknown>) =>

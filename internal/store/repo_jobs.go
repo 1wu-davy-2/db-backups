@@ -52,6 +52,11 @@ func (s *Store) MarkJobRunning(ctx context.Context, id int64) (bool, error) {
 	return tag.RowsAffected() > 0, nil
 }
 
+func (s *Store) CancelPendingJob(ctx context.Context, id int64) error {
+	_, err := s.pool.Exec(ctx, `UPDATE jobs SET status='canceled', finished_at=now(), error_code='CANCELED', error_message='排队期间被取消' WHERE id=$1 AND status='pending'`, id)
+	return err
+}
+
 type JobResult struct {
 	Status        string
 	SizeBytes     int64

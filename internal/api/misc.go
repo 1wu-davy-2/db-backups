@@ -38,11 +38,12 @@ func (s *Server) handleDaily(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":    Version,
-		"toolchain":  s.Tools.List(),
-		"storage":    s.Blob.Kind(),
-		"data_dir":   s.DataDir,
-		"encryption": "AES-256-GCM (分块)",
+		"version":         Version,
+		"toolchain":       s.Tools.List(),
+		"mysql_toolchain": s.MySQLTools.List(),
+		"storage":         s.Blob.Kind(),
+		"data_dir":        s.DataDir,
+		"encryption":      "AES-256-GCM (分块)",
 	})
 }
 

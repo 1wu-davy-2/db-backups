@@ -169,8 +169,12 @@ export default function Dashboard({ onView, onJob }: Props) {
                 <div style={{ color: 'var(--warn)', fontWeight: 500 }}>未发现可用的 pg_dump</div>
                 <div className="small muted" style={{ marginTop: 6 }}>在服务端设置 <code>BACKUP_PG_BIN_DIRS</code>，或将客户端放入数据目录下的 <code>pgclient/&lt;版本&gt;/bin</code>，然后重启服务。</div>
               </>}
+          {system && !systemErr && <div className="toolchain-help toolchain-list">
+            {system.mysql_toolchain?.length ? system.mysql_toolchain.map((tool) => <div className="toolchain-row" key={tool.path}><span className="badge badge-info">{tool.engine} {tool.version}</span><span className="mono small muted toolchain-path">{tool.path}</span></div>) : <div className="small muted">未发现 MySQL / MariaDB 导出客户端</div>}
+            <div className="small muted">MySQL / MariaDB 必须使用同厂商、同主次版本系列客户端。设置 <code>BACKUP_MYSQL_BIN_DIRS</code>，或放入 <code>mysqlclient/&lt;版本&gt;/bin</code>；容器部署需挂载对应 Linux 客户端及依赖。</div>
+          </div>}
           <div className="toolchain-help small muted">
-            客户端主版本必须 ≥ 目标库主版本；系统自动选择满足条件的最小版本，并不代表兼容所有目标库。
+            PostgreSQL 客户端主版本必须 ≥ 目标库主版本；系统自动选择满足条件的最小版本，并不代表兼容所有目标库。
             在服务端运行 <code>backupd --check-tools</code> 可查看探测路径；安装客户端后需重启服务。
           </div>
         </div>
